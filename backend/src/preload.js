@@ -53,7 +53,11 @@ const {
   closeMcpClient,
   connectAndFetchTools,
   connectAndInvokeTool,
+  ensureMcpAuthenticated,
+  getMcpAuthStatus,
 } = require('./mcp.js');
+
+const oauthStore = require('./mcp_oauth_store.js');
 
 const {
   listSkills,
@@ -184,6 +188,50 @@ window.api = {
   },
   invokeMcpTool,
   closeMcpClient,
+  // --- MCP OAuth IPC ---
+  mcpOAuth_getStatus: async ({ serverId, serverConfig } = {}) => {
+    try {
+      return { success: true, status: await getMcpAuthStatus(serverId, serverConfig) };
+    } catch (e) {
+      return { success: false, error: String(e.message || e) };
+    }
+  },
+  mcpOAuth_startAuthFlow: async ({ serverConfig } = {}) => {
+    try {
+      const ok = await ensureMcpAuthenticated(serverConfig.id, serverConfig);
+      const status = await getMcpAuthStatus(serverConfig.id, serverConfig);
+      return { success: true, authenticated: ok, status };
+    } catch (e) {
+      console.error("[Preload] mcpOAuth_startAuthFlow error:", e);
+      return { success: false, error: String(e.message || e) };
+    }
+  },
+  mcpOAuth_refresh: async ({ serverId } = {}) => {
+    try {
+      const tokens = await oauthStore.loadTokens(serverId);
+      if (!tokens) return { success: false, error: 'No tokens to refresh' };
+      return { success: true, refreshed: true };
+    } catch (e) {
+      return { success: false, error: String(e.message || e) };
+    }
+  },
+  mcpOAuth_logout: async ({ serverId } = {}) => {
+    try {
+      await oauthStore.clearTokens(serverId);
+      await oauthStore.clearCodeVerifier(serverId);
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: String(e.message || e) };
+    }
+  },
+  mcpOAuth_saveManualClient: async ({ serverId, clientId, clientSecret } = {}) => {
+    try {
+      await oauthStore.saveClientInfo(serverId, { client_id: clientId, client_secret: clientSecret });
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: String(e.message || e) };
+    }
+  },
   isFileTypeSupported,
   parseFileObject,
   exportLocalChatFile: async (sourcePath, dialogOptions = {}) => {

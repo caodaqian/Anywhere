@@ -285,6 +285,13 @@ window.api = {
     closeMcpClient: async (...args) => {
         return await getMcpModule().closeMcpClient(...args);
     },
+    // Read-only OAuth status passthrough (window can display auth badges but
+    // cannot drive login — that lives in the main panel via preload.js).
+    mcpOAuth_getStatus: async (...args) => {
+        const mod = getMcpModule();
+        if (mod.getMcpAuthStatus) return { success: true, status: await mod.getMcpAuthStatus(...args) };
+        return { success: false, error: 'getMcpAuthStatus unavailable' };
+    },
     isFileTypeSupported,
     parseFileObject,
     shellOpenPath: (fullPath) => {
