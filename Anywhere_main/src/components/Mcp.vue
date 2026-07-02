@@ -32,6 +32,99 @@ const testFormData = ref({});
 const testRunning = ref(false);
 const testOutput = ref('');
 
+// --- OAuth auth status + actions (per editing server) ---
+const oauthStatus = ref(null);
+const oauthBusy = ref(false);
+
+function buildServerConfigForAuth() {
+    // Reconstruct the server config object the backend expects for OAuth ops,
+    // from the editing form state.
+    return {
+        id: editingServer.id,
+        type: editingServer.type,
+        baseUrl: editingServer.baseUrl,
+        command: editingServer.command,
+        args: editingServer.args ? convertTextToLines(editingServer.args) : [],
+        env: convertTextToObject(editingServer.env),
+        headers: convertTextToObject(editingServer.headers),
+        auth: normalizeAuth(editingServer.auth)
+    };
+}
+
+async function refreshOAuthStatus() {
+    if (!editingServer.auth || editingServer.auth.type !== 'oauth') { oauthStatus.value = null; return; }
+    if (!editingServer.id) { oauthStatus.value = null; return; }
+    try {
+        const r = await window.api.mcpOAuth_getStatus({ serverId: editingServer.id, serverConfig: buildServerConfigForAuth() });
+        if (r && r.success) oauthStatus.value = r.status; else oauthStatus.value = null;
+    } catch (e) { oauthStatus.value = null; }
+}
+
+async function startOAuthLogin() {
+    if (!editingServer.baseUrl && editingServer.type !== 'stdio') { ElMessage.warning(t('mcp.auth.needUrl')); return; }
+    oauthBusy.value = true;
+    try {
+        const r = await window.api.mcpOAuth_startAuthFlow({ serverConfig: buildServerConfigForAuth() });
+        if (r && r.success) {
+            oauthStatus.value = r.status;
+            ElMessage.success(t('mcp.auth.loginSuccess'));
+        } else {
+            ElMessage.error(t('mcp.auth.loginFailed') + (r && r.error ? ': ' + r.error : ''));
+        }
+    } catch (e) {
+        ElMessage.error(t('mcp.auth.loginFailed') + ': ' + (e.message || e));
+    } finally {
+        oauthBusy.value = false;
+    }
+}
+
+async function refreshOAuth() {
+    if (!editingServer.id) return;
+    oauthBusy.value = true;
+    try {
+        await window.api.mcpOAuth_refresh({ serverId: editingServer.id });
+        await refreshOAuthStatus();
+        ElMessage.success(t('mcp.auth.refreshed'));
+    } catch (e) {
+        ElMessage.error(String(e.message || e));
+    } finally { oauthBusy.value = false; }
+}
+
+async function logoutOAuth() {
+    if (!editingServer.id) return;
+    try {
+        await ElMessageBox.confirm(t('mcp.auth.logoutConfirm'), t('common.confirm'), { type: 'warning' });
+    } catch (_) { return; }
+    oauthBusy.value = true;
+    try {
+        await window.api.mcpOAuth_logout({ serverId: editingServer.id });
+        oauthStatus.value = null;
+        ElMessage.success(t('mcp.auth.loggedOut'));
+    } catch (e) {
+        ElMessage.error(String(e.message || e));
+    } finally { oauthBusy.value = false; }
+}
+
+async function saveManualClient() {
+    if (!editingServer.id) return;
+    const oauth = editingServer.auth.oauth;
+    if (!oauth || !oauth.clientId) { ElMessage.warning(t('mcp.auth.needClientId')); return; }
+    try {
+        await window.api.mcpOAuth_saveManualClient({ serverId: editingServer.id, clientId: oauth.clientId, clientSecret: oauth.clientSecret });
+        ElMessage.success(t('mcp.auth.clientSaved'));
+        await refreshOAuthStatus();
+    } catch (e) { ElMessage.error(String(e.message || e)); }
+}
+
+function oauthStatusText() {
+    const s = oauthStatus.value;
+    if (!s) return '';
+    if (!s.configured) return t('mcp.auth.statusNotConfigured');
+    if (!s.authenticated) return t('mcp.auth.statusNotLoggedIn');
+    if (s.expired) return t('mcp.auth.statusExpired');
+    return t('mcp.auth.statusLoggedIn');
+}
+
 // 计算当前选中工具的 Schema
 const currentTestToolSchema = computed(() => {
     if (!currentTestToolName.value) return [];
@@ -81,17 +174,64 @@ const defaultServer = {
     args: [],
     env: {},
     headers: {},
+    auth: {
+        type: 'none',
+        bearerToken: '',
+        oauth: { clientId: '', clientSecret: '', scopes: [], envMapping: ['OAUTH_TOKEN', 'MCP_OAUTH_TOKEN'], useDcr: true }
+    },
     provider: '',
     providerUrl: '',
     logoUrl: '',
     tags: []
 };
 
+function normalizeAuth(auth) {
+    if (!auth || typeof auth !== 'object') return { type: 'none', bearerToken: '', oauth: { scopes: [], scopesInput: '', envMapping: ['OAUTH_TOKEN', 'MCP_OAUTH_TOKEN'], envMappingInput: 'OAUTH_TOKEN, MCP_OAUTH_TOKEN', useDcr: true } };
+    const out = { type: auth.type || 'none', bearerToken: auth.bearerToken || '' };
+    if (auth.type === 'oauth') {
+        const scopes = Array.isArray(auth.oauth?.scopes) ? auth.oauth.scopes : [];
+        const envMapping = Array.isArray(auth.oauth?.envMapping) && auth.oauth.envMapping.length ? auth.oauth.envMapping : ['OAUTH_TOKEN', 'MCP_OAUTH_TOKEN'];
+        out.oauth = {
+            clientId: auth.oauth?.clientId || '',
+            clientSecret: auth.oauth?.clientSecret || '',
+            scopes,
+            scopesInput: scopes.join(', '),
+            envMapping,
+            envMappingInput: envMapping.join(', '),
+            useDcr: auth.oauth?.useDcr !== false,
+            redirectPath: auth.oauth?.redirectPath,
+            manualEndpoints: auth.oauth?.manualEndpoints || {}
+        };
+    }
+    return out;
+}
+
+// Migrate a legacy `Authorization: Bearer <token>` header into auth.bearer.
+// Shared by both the single-server save path and the batch JSON edit entry so
+// both ports migrate consistently. Mutates the passed (headers, auth) pair.
+function migrateLegacyBearer(headers, auth) {
+    if (!headers || typeof headers !== 'object') return { headers, auth };
+    const raw = headers['Authorization'] || headers['authorization'];
+    if (typeof raw !== 'string') return { headers, auth };
+    const m = raw.match(/^\s*Bearer\s+(.+?)\s*$/i);
+    if (!m) return { headers, auth }; // non-Bearer (e.g. Basic) → keep as-is
+    const existing = auth && (auth.type === 'bearer' || auth.type === 'oauth');
+    if (existing) return { headers, auth }; // already configured → don't override
+    const nextHeaders = { ...headers };
+    delete nextHeaders['Authorization'];
+    delete nextHeaders['authorization'];
+    const nextAuth = normalizeAuth(auth);
+    nextAuth.type = 'bearer';
+    nextAuth.bearerToken = m[1];
+    return { headers: nextHeaders, auth: nextAuth, migrated: true };
+}
+
 const createEditingServerState = () => ({
     ...defaultServer,
     args: '',
     env: '',
     headers: '',
+    auth: JSON.parse(JSON.stringify(defaultServer.auth)),
     tags: ''
 });
 
@@ -205,6 +345,7 @@ function prepareAddServer() {
     isNewServer.value = true;
     Object.assign(editingServer, createEditingServerState());
     advancedCollapse.value = [];
+    oauthStatus.value = null;
     showEditDialog.value = true;
 }
 
@@ -217,10 +358,12 @@ function prepareEditServer(server) {
         args: convertLinesToText(server.args),
         env: convertObjectToText(server.env),
         headers: convertObjectToText(server.headers),
+        auth: normalizeAuth(server.auth),
         tags: Array.isArray(server.tags) ? server.tags.join(', ') : ''
     });
     advancedCollapse.value = [];
     showEditDialog.value = true;
+    if (editingServer.auth.type === 'oauth') refreshOAuthStatus();
 }
 
 async function saveServer() {
@@ -242,7 +385,25 @@ async function saveServer() {
     addIfPresent(serverData, 'command', editingServer.command);
     addIfArrayPresent(serverData, 'args', convertTextToLines(editingServer.args));
     addIfObjectPresent(serverData, 'env', convertTextToObject(editingServer.env));
-    addIfObjectPresent(serverData, 'headers', convertTextToObject(editingServer.headers));
+    let headersObj = convertTextToObject(editingServer.headers);
+    let authObj = normalizeAuth(editingServer.auth);
+    // Convert text inputs back to arrays before persistence.
+    if (authObj.type === 'oauth' && authObj.oauth) {
+        authObj.oauth.scopes = (editingServer.auth.oauth.scopesInput || '')
+            .split(',').map(s => s.trim()).filter(Boolean);
+        authObj.oauth.envMapping = (editingServer.auth.oauth.envMappingInput || '')
+            .split(',').map(s => s.trim()).filter(Boolean);
+        if (!authObj.oauth.scopes.length) delete authObj.oauth.scopes;
+        if (!authObj.oauth.clientId) delete authObj.oauth.clientId;
+        if (!authObj.oauth.clientSecret) delete authObj.oauth.clientSecret;
+    }
+    // Apply legacy Bearer migration (headers.Authorization: Bearer X → auth.bearer).
+    const migrated = migrateLegacyBearer(headersObj, authObj);
+    headersObj = migrated.headers;
+    authObj = migrated.auth;
+    if (migrated.migrated) ElMessage.info(t('mcp.auth.migrationNotice'));
+    addIfObjectPresent(serverData, 'headers', headersObj);
+    if (authObj && authObj.type && authObj.type !== 'none') serverData.auth = authObj;
     addIfPresent(serverData, 'provider', editingServer.provider);
     addIfPresent(serverData, 'providerUrl', editingServer.providerUrl);
     addIfPresent(serverData, 'logoUrl', editingServer.logoUrl);
@@ -312,6 +473,21 @@ async function saveJson() {
             throw new Error(t('mcp.alerts.jsonError'));
         }
         const newMcpServers = parsedJson.mcpServers;
+
+        // Batch JSON entry: run legacy Bearer migration per server for parity
+        // with the single-server save path.
+        let anyMigrated = false;
+        if (newMcpServers && typeof newMcpServers === 'object') {
+            for (const sid of Object.keys(newMcpServers)) {
+                const srv = newMcpServers[sid];
+                if (!srv || typeof srv !== 'object') continue;
+                const r = migrateLegacyBearer(srv.headers || {}, srv.auth);
+                srv.headers = r.headers;
+                srv.auth = r.auth;
+                if (r.migrated) { anyMigrated = true; }
+            }
+        }
+        if (anyMigrated) ElMessage.info(t('mcp.auth.migrationNotice'));
 
         await atomicSave(config => {
             config.mcpServers = newMcpServers;
@@ -738,6 +914,61 @@ async function triggerConnectionTest(server) {
                         </el-form-item>
                     </template>
 
+                    <el-divider content-position="left">{{ t('mcp.auth.sectionTitle') }}</el-divider>
+                    <el-form-item :label="t('mcp.auth.type')">
+                        <el-radio-group v-model="editingServer.auth.type" @change="refreshOAuthStatus">
+                            <el-radio value="none">{{ t('mcp.auth.typeNone') }}</el-radio>
+                            <el-radio value="bearer">{{ t('mcp.auth.typeBearer') }}</el-radio>
+                            <el-radio value="oauth">{{ t('mcp.auth.typeOAuth') }}</el-radio>
+                        </el-radio-group>
+                    </el-form-item>
+                    <el-form-item v-if="editingServer.auth.type === 'bearer'" :label="t('mcp.auth.bearerToken')">
+                        <el-input v-model="editingServer.auth.bearerToken" show-password
+                            :placeholder="t('mcp.auth.bearerTokenPlaceholder')" />
+                    </el-form-item>
+                    <template v-if="editingServer.auth.type === 'oauth'">
+                        <el-form-item :label="t('mcp.auth.clientId')">
+                            <el-input v-model="editingServer.auth.oauth.clientId"
+                                :placeholder="t('mcp.auth.clientIdPlaceholder')" />
+                        </el-form-item>
+                        <el-form-item :label="t('mcp.auth.clientSecret')">
+                            <el-input v-model="editingServer.auth.oauth.clientSecret" show-password
+                                :placeholder="t('mcp.auth.clientSecretPlaceholder')" />
+                        </el-form-item>
+                        <el-form-item :label="t('mcp.auth.scopes')">
+                            <el-input v-model="editingServer.auth.oauth.scopesInput"
+                                :placeholder="t('mcp.auth.scopesPlaceholder')" />
+                        </el-form-item>
+                        <el-form-item :label="t('mcp.auth.envMapping')" v-if="editingServer.type === 'stdio'">
+                            <el-input v-model="editingServer.auth.oauth.envMappingInput"
+                                :placeholder="t('mcp.auth.envMappingPlaceholder')" />
+                        </el-form-item>
+                        <el-form-item :label="t('mcp.auth.useDcr')">
+                            <el-switch v-model="editingServer.auth.oauth.useDcr" />
+                        </el-form-item>
+                        <el-form-item :label="t('mcp.auth.actions')">
+                            <div class="oauth-actions">
+                                <el-button size="small" @click="saveManualClient" :disabled="oauthBusy">
+                                    {{ t('mcp.auth.saveClient') }}
+                                </el-button>
+                                <el-button size="small" type="primary" @click="startOAuthLogin" :loading="oauthBusy">
+                                    {{ t('mcp.auth.login') }}
+                                </el-button>
+                                <el-button size="small" @click="refreshOAuth" :disabled="oauthBusy">
+                                    {{ t('mcp.auth.refresh') }}
+                                </el-button>
+                                <el-button size="small" type="danger" @click="logoutOAuth" :disabled="oauthBusy">
+                                    {{ t('mcp.auth.logout') }}
+                                </el-button>
+                            </div>
+                        </el-form-item>
+                        <el-form-item :label="t('mcp.auth.tokenStatus')" v-if="oauthStatus">
+                            <el-tag :type="oauthStatus.authenticated ? (oauthStatus.expired ? 'warning' : 'success') : 'info'">
+                                {{ oauthStatusText() }}
+                            </el-tag>
+                        </el-form-item>
+                    </template>
+
                     <el-collapse v-model="advancedCollapse" class="advanced-collapse">
                         <el-collapse-item :title="t('mcp.advanced')" name="1">
                             <el-row :gutter="20">
@@ -973,6 +1204,13 @@ async function triggerConnectionTest(server) {
 </style>
 
 <style scoped>
+/* ================= OAuth actions ================= */
+.oauth-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
 /* ================= 全局布局 ================= */
 .page-container {
     display: flex;
