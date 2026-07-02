@@ -168,25 +168,35 @@ async function finishAuthFlow({ serverId, provider, serverConfig, transport, cal
 }
 
 // Resolve the SDK's CJS auth module. It's a transitive dependency (via
-// @langchain/mcp-adapters), so we resolve from the adapter's location to be
-// robust across pnpm/npm layouts.
+// @langchain/mcp-adapters), so we resolve it from the adapter's own directory
+// so Node follows the adapter's dependency tree (under pnpm isolation the SDK
+// lives in the adapter's scoped node_modules, not the top-level one).
 function loadSdkAuth() {
+  const subpaths = [
+    '@modelcontextprotocol/sdk/client/auth.js',
+    '@modelcontextprotocol/sdk/dist/cjs/client/auth.js'
+  ];
+  // First, try resolving each subpath from the adapter's location (its
+  // require stack sees the scoped SDK).
   try {
-    const adapterPath = require.resolve('@langchain/mcp-adapters');
-    const idx = adapterPath.indexOf('node_modules');
-    const root = idx >= 0 ? adapterPath.slice(0, idx + 'node_modules'.length) : null;
-    const candidates = [
-      root && `${root}/@modelcontextprotocol/sdk/dist/cjs/client/auth.js`,
-      root && `${root}/@modelcontextprotocol/sdk/client/auth.js`,
-      '@modelcontextprotocol/sdk/client/auth.js',
-      '@modelcontextprotocol/sdk/dist/cjs/client/auth.js'
-    ].filter(Boolean);
-    for (const c of candidates) {
-      try { return require(c); } catch (_) { /* try next */ }
+    const adapterMain = require.resolve('@langchain/mcp-adapters');
+    const adapterDir = require('path').dirname(adapterMain);
+    for (const sub of subpaths) {
+      try {
+        const resolved = require.resolve(sub, { paths: [adapterDir] });
+        return require(resolved);
+      } catch (_) { /* try next */ }
     }
-  } catch (_) { /* fall through */ }
-  // Last resort: try direct subpath (works if SDK is hoisted to top-level).
-  return require('@modelcontextprotocol/sdk/client/auth.js');
+  } catch (_) { /* adapter not resolvable — fall through */ }
+  // Fallback: resolve from this module's own directory (works if SDK is
+  // hoisted to top-level or this module's tree can see it).
+  for (const sub of subpaths) {
+    try {
+      const resolved = require.resolve(sub, { paths: [__dirname] });
+      return require(resolved);
+    } catch (_) { /* try next */ }
+  }
+  throw new Error('Could not resolve @modelcontextprotocol/sdk auth module');
 }
 
 // ---------------------------------------------------------------------------
