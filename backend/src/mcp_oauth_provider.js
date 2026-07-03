@@ -18,6 +18,19 @@ const crypto = require('crypto');
 const store = require('./mcp_oauth_store.js');
 const cb = require('./mcp_oauth_cb.js');
 
+// Statically require the SDK auth module so esbuild bundles it into the
+// preload artifact. The dynamic require.resolve() approach used previously
+// fails at runtime in the bundled utools environment (no resolvable
+// node_modules there). The exports wildcard (`./*` → `./dist/cjs/*`) makes
+// this subpath resolvable at build time; esbuild inlines it so `_sdkAuth` is
+// populated in the bundle. The try/catch keeps a dynamic fallback for the
+// non-bundled test environment (node tests run against src/ where pnpm
+// isolation means the SDK isn't hoisted to a directly-resolvable location).
+let _sdkAuth = null;
+try {
+  _sdkAuth = require('@modelcontextprotocol/sdk/client/auth.js');
+} catch (_) { _sdkAuth = null; }
+
 const DEFAULT_REDIRECT_PORT = 0; // ephemeral loopback
 
 // ---------------------------------------------------------------------------
@@ -167,11 +180,13 @@ async function finishAuthFlow({ serverId, provider, serverConfig, transport, cal
   return { tokens };
 }
 
-// Resolve the SDK's CJS auth module. It's a transitive dependency (via
-// @langchain/mcp-adapters), so we resolve it from the adapter's own directory
-// so Node follows the adapter's dependency tree (under pnpm isolation the SDK
-// lives in the adapter's scoped node_modules, not the top-level one).
+// Resolve the SDK's CJS auth module. Prefer the static top-level require
+// (bundled by esbuild) so this works in the utools preload artifact. Fall
+// back to dynamic resolution from the adapter's location for the
+// non-bundled test environment (pnpm isolation: SDK not hoisted to a path
+// Node can resolve from this module directly).
 function loadSdkAuth() {
+  if (_sdkAuth) return _sdkAuth;
   const subpaths = [
     '@modelcontextprotocol/sdk/client/auth.js',
     '@modelcontextprotocol/sdk/dist/cjs/client/auth.js'

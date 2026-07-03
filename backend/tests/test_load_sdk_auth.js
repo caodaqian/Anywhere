@@ -1,11 +1,10 @@
-// Verify loadSdkAuth (from mcp_oauth_provider.js) resolves the SDK auth module.
-const fs = require('fs');
-const src = fs.readFileSync(require('path').join(__dirname, '..', 'src', 'mcp_oauth_provider.js'), 'utf8');
-const match = src.match(/function loadSdkAuth\(\)\s*\{[\s\S]*?\n\}/);
-if (!match) { console.error('loadSdkAuth not found'); process.exit(1); }
-eval(match[0]);
+// Verify loadSdkAuth (exported from mcp_oauth_provider.js) resolves the SDK
+// auth module in the current environment. In the non-bundled test env the
+// top-level static require fails (pnpm isolation), so loadSdkAuth falls back
+// to dynamic resolution via the adapter's dependency tree.
+const provider = require('../src/mcp_oauth_provider.js');
 try {
-  const mod = loadSdkAuth();
+  const mod = provider.loadSdkAuth();
   console.log('loadSdkAuth OK: exports=' + Object.keys(mod).slice(0, 6).join(',') + '...');
   console.log('has auth fn:', typeof mod.auth === 'function');
   console.log('has UnauthorizedError:', typeof mod.UnauthorizedError === 'function');

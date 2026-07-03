@@ -166,18 +166,10 @@ async function ckAsync(n, p) { try { const v = await p; if (v) pass++; else { fa
 
   // ---- Item 8: fallback path (port occupied → BrowserWindow fallback) ----
   console.log('Item 8: loopback port-occupied fallback route exists');
-  // Also: finishAuthFlow Path B dependency — loadSdkAuth must resolve.
-  const fs2 = require('fs');
-  const src = fs2.readFileSync(require('path').join(__dirname, '..', 'src', 'mcp_oauth_provider.js'), 'utf8');
-  const m = src.match(/function loadSdkAuth\(\)\s*\{[\s\S]*?\n\}/);
-  if (m) {
-    eval(m[0]);
-    let authOk = false;
-    try { const mod = loadSdkAuth(); authOk = typeof mod.auth === 'function' && typeof mod.UnauthorizedError === 'function'; } catch (e) { authOk = false; }
-    ck('finishAuthFlow Path B: loadSdkAuth resolves SDK auth+UnauthorizedError', authOk);
-  } else {
-    ck('loadSdkAuth function present in provider module', false);
-  }
+  // Also: finishAuthFlow Path B dependency — loadSdkAuth (exported) must resolve.
+  let authOk = false;
+  try { const mod = providerMod.loadSdkAuth(); authOk = typeof mod.auth === 'function' && typeof mod.UnauthorizedError === 'function'; } catch (e) { authOk = false; }
+  ck('finishAuthFlow Path B: loadSdkAuth resolves SDK auth+UnauthorizedError', authOk);
   // occupy a port, then attempt startLoopbackCallback on same port → should error,
   // and runAuthFlowWithFallback should then route to BrowserWindow fallback.
   const occ = http.createServer((req, res) => res.end('occupier'));
