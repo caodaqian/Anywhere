@@ -782,7 +782,8 @@ const refreshSelectedMcpServers = async () => {
       baseUrl: serverConf.baseUrl,
       env: serverConf.env,
       headers: serverConf.headers,
-      args: serverConf.args
+      args: serverConf.args,
+      auth: serverConf.auth,
     };
 
     const res = await window.api.testMcpConnection(configToTest);
@@ -4790,6 +4791,7 @@ async function applyMcpTools(show_none = true, reason = 'unknown') {
         headers: serverConf.headers,
         timeoutSeconds: serverConf.timeoutSeconds,
         isPersistent: serverConf.isPersistent,
+        auth: serverConf.auth,
       };
     }
   }

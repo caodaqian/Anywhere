@@ -1,3 +1,18 @@
+// Polyfill URL.canParse for runtimes whose global URL lacks the Node 20+
+// static canParse method (e.g. utools/electron preload). The MCP SDK
+// (shared/auth.js SafeUrlSchema) calls URL.canParse during OAuth discovery;
+// without this shim it throws "URL.canParse is not a function".
+if (typeof URL === 'function' && typeof URL.canParse !== 'function') {
+  URL.canParse = function canParse(url, base) {
+    try {
+      new URL(url, base);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
+}
+
 // MCP OAuth v1 OAuthClientProvider adapter + finishAuth orchestrator.
 //
 // Bridges:
@@ -106,7 +121,12 @@ function buildOAuthClientProvider(serverId, serverConfig = {}) {
       cb.openAuthorizationInExternal(url);
     },
     async codeVerifier() {
-      return await store.loadCodeVerifier(serverId);
+      const slot = await store.loadCodeVerifier(serverId);
+      // loadCodeVerifier returns { value, updatedAt }; the SDK needs the raw
+      // verifier string. Returning the wrapper object here would make
+      // `code_verifier` serialize to "[object Object]" in the token request
+      // and the server would reject it as "Invalid PKCE code_verifier".
+      return slot ? slot.value : undefined;
     },
     async saveCodeVerifier(v) {
       await store.saveCodeVerifier(serverId, v);
@@ -114,7 +134,13 @@ function buildOAuthClientProvider(serverId, serverConfig = {}) {
 
     // --- optional (v1) / forward-looking (v2) ---
     async state() {
-      pendingState = crypto.randomBytes(16).toString('hex');
+      // Idempotent within one auth flow: the orchestrator calls state() to
+      // seed the loopback callback's expectedState, then the SDK calls it
+      // again to build the authorize URL. If we re-randomized on the second
+      // call the two sides would diverge and the callback would reject with
+      // "state mismatch". Reuse pendingState if already set; redirectToAuthorization
+      // can still update it later when it parses the actual authorize URL.
+      if (!pendingState) pendingState = crypto.randomBytes(16).toString('hex');
       return pendingState;
     },
     async invalidateCredentials(scope) {

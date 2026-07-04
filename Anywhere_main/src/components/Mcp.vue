@@ -1,8 +1,8 @@
 <script setup>
-import { ref, reactive, computed, inject } from 'vue';
-import { useI18n } from 'vue-i18n';
-import { ElMessage, ElMessageBox, ElScrollbar, ElAlert } from 'element-plus';
-import { Plus, Delete, Edit, CopyDocument, Tools, Search, Refresh, QuestionFilled, Link, CaretRight, CaretBottom } from '@element-plus/icons-vue';
+    import { CopyDocument, Delete, Edit, Link, Plus, QuestionFilled, Refresh, Search, Tools } from '@element-plus/icons-vue';
+    import { ElAlert, ElMessage, ElMessageBox, ElScrollbar } from 'element-plus';
+    import { computed, inject, reactive, ref } from 'vue';
+    import { useI18n } from 'vue-i18n';
 const { t } = useI18n();
 const currentConfig = inject('config');
 
@@ -582,7 +582,8 @@ async function runToolTest() {
             timeoutSeconds: normalizeTimeoutSecondsInput(server.timeoutSeconds),
             env: typeof server.env === 'string' ? convertTextToObject(server.env) : server.env,
             headers: typeof server.headers === 'string' ? convertTextToObject(server.headers) : server.headers,
-            args: Array.isArray(server.args) ? server.args : convertTextToLines(server.args)
+            args: Array.isArray(server.args) ? server.args : convertTextToLines(server.args),
+            auth: normalizeAuth(server.auth)
         };
 
         const response = await window.api.testInvokeMcpTool(configToTest, currentTestToolName.value, args);
@@ -703,7 +704,8 @@ async function triggerConnectionTest(server) {
         baseUrl: server.baseUrl,
         env: typeof server.env === 'string' ? convertTextToObject(server.env) : server.env,
         headers: typeof server.headers === 'string' ? convertTextToObject(server.headers) : server.headers,
-        args: Array.isArray(server.args) ? server.args : convertTextToLines(server.args)
+        args: Array.isArray(server.args) ? server.args : convertTextToLines(server.args),
+        auth: normalizeAuth(server.auth)
     };
 
     try {
@@ -927,30 +929,15 @@ async function triggerConnectionTest(server) {
                             :placeholder="t('mcp.auth.bearerTokenPlaceholder')" />
                     </el-form-item>
                     <template v-if="editingServer.auth.type === 'oauth'">
-                        <el-form-item :label="t('mcp.auth.clientId')">
-                            <el-input v-model="editingServer.auth.oauth.clientId"
-                                :placeholder="t('mcp.auth.clientIdPlaceholder')" />
-                        </el-form-item>
-                        <el-form-item :label="t('mcp.auth.clientSecret')">
-                            <el-input v-model="editingServer.auth.oauth.clientSecret" show-password
-                                :placeholder="t('mcp.auth.clientSecretPlaceholder')" />
-                        </el-form-item>
-                        <el-form-item :label="t('mcp.auth.scopes')">
-                            <el-input v-model="editingServer.auth.oauth.scopesInput"
-                                :placeholder="t('mcp.auth.scopesPlaceholder')" />
+                        <el-form-item>
+                            <el-alert :title="t('mcp.auth.dcrHint')" type="info" :closable="false" show-icon />
                         </el-form-item>
                         <el-form-item :label="t('mcp.auth.envMapping')" v-if="editingServer.type === 'stdio'">
                             <el-input v-model="editingServer.auth.oauth.envMappingInput"
                                 :placeholder="t('mcp.auth.envMappingPlaceholder')" />
                         </el-form-item>
-                        <el-form-item :label="t('mcp.auth.useDcr')">
-                            <el-switch v-model="editingServer.auth.oauth.useDcr" />
-                        </el-form-item>
                         <el-form-item :label="t('mcp.auth.actions')">
                             <div class="oauth-actions">
-                                <el-button size="small" @click="saveManualClient" :disabled="oauthBusy">
-                                    {{ t('mcp.auth.saveClient') }}
-                                </el-button>
                                 <el-button size="small" type="primary" @click="startOAuthLogin" :loading="oauthBusy">
                                     {{ t('mcp.auth.login') }}
                                 </el-button>
@@ -987,6 +974,33 @@ async function triggerConnectionTest(server) {
                                     v-model="editingServer.providerUrl" /></el-form-item>
                             <el-form-item :label="t('mcp.tags')"><el-input v-model="editingServer.tags"
                                     :placeholder="t('mcp.tagsPlaceholder')" /></el-form-item>
+                            <template v-if="editingServer.auth.type === 'oauth'">
+                                <el-divider
+                                    content-position="left">{{ t('mcp.auth.oauthAdvancedSection') }}</el-divider>
+                                <el-form-item :label="t('mcp.auth.scopes')">
+                                    <el-input v-model="editingServer.auth.oauth.scopesInput"
+                                        :placeholder="t('mcp.auth.scopesPlaceholder')" />
+                                </el-form-item>
+                                <el-divider content-position="left">{{ t('mcp.auth.manualClientSection') }}</el-divider>
+                                <el-form-item :label="t('mcp.auth.useDcr')">
+                                    <el-switch v-model="editingServer.auth.oauth.useDcr" />
+                                </el-form-item>
+                                <template v-if="!editingServer.auth.oauth.useDcr">
+                                    <el-form-item :label="t('mcp.auth.clientId')">
+                                        <el-input v-model="editingServer.auth.oauth.clientId"
+                                            :placeholder="t('mcp.auth.clientIdPlaceholder')" />
+                                    </el-form-item>
+                                    <el-form-item :label="t('mcp.auth.clientSecret')">
+                                        <el-input v-model="editingServer.auth.oauth.clientSecret" show-password
+                                            :placeholder="t('mcp.auth.clientSecretPlaceholder')" />
+                                    </el-form-item>
+                                    <el-form-item>
+                                        <el-button size="small" @click="saveManualClient" :disabled="oauthBusy">
+                                            {{ t('mcp.auth.saveClient') }}
+                                        </el-button>
+                                    </el-form-item>
+                                </template>
+                            </template>
                         </el-collapse-item>
                     </el-collapse>
                 </el-form>
@@ -1024,13 +1038,12 @@ async function triggerConnectionTest(server) {
                             <span v-else>{{ testResult.serverName }}</span>
                         </span>
                     </div>
-                    
+
                     <!-- 中间/右侧：Tab 切换与刷新按钮组合 -->
                     <div style="display: flex; align-items: center; gap: 12px;">
                         <!-- 只有连接成功且有工具时才显示 Tab 切换 -->
-                        <el-radio-group 
-                            v-if="testResult.success && testResult.tools.length > 0 && !testResult.loading" 
-                            v-model="activeTestTab" 
+                        <el-radio-group v-if="testResult.success && testResult.tools.length > 0 && !testResult.loading"
+                            v-model="activeTestTab"
                             size="small"
                         >
                             <el-radio-button value="list">{{ t('mcp.tabs.tools') }}</el-radio-button>

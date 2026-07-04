@@ -136,6 +136,7 @@ window.api = {
         url: serverConfig.baseUrl,
         env: serverConfig.env,
         headers: serverConfig.headers,
+        auth: serverConfig.auth,
       });
 
       const sanitizedTools = rawTools.map(tool => ({
@@ -179,7 +180,8 @@ window.api = {
         env: serverConfig.env,
         headers: serverConfig.headers,
         timeoutSeconds: serverConfig.timeoutSeconds,
-        type: serverConfig.type // 确保 type 传递给 builtin 判断
+        type: serverConfig.type, // 确保 type 传递给 builtin 判断
+        auth: serverConfig.auth,
       }, toolName, args);
       return { success: true, result };
     } catch (error) {
@@ -407,7 +409,7 @@ const commandHandlers = {
     // 2. 将高开销的底层 API 调用和窗口创建推入下一个事件循环，让系统的隐藏动画先行
     setTimeout(() => {
       const { windowMap, openAppendSelectorWindow } = require('./data.js');
-      
+
       // 清理僵尸窗口逻辑
       for (const [sid, win] of windowMap.entries()) {
         if (win.isDestroyed()) {
@@ -431,7 +433,7 @@ const commandHandlers = {
         if (payload[0].isDirectory){
           payload_new = "`"+payload[0].path+"`";
           type_new = "over";
-        } 
+        }
       }
 
       // 如果只有一个窗口，直接跳过选择，智能追加
@@ -442,7 +444,7 @@ const commandHandlers = {
           if (win.isMinimized()) win.restore();
           if (!win.isVisible()) win.show();
           win.focus();
-          
+
           win.webContents.send('window-append-msg', {
             type: type_new,
             payload: payload_new
@@ -462,7 +464,7 @@ const commandHandlers = {
     // 避免弹出主窗口
     utools.hideMainWindow();
     const { type, payload, code } = action;
-    
+
     const senderId = code.replace('append_to_', '');
     const { windowMap } = require('./data.js');
     const win = windowMap.get(senderId);
@@ -653,11 +655,11 @@ const commandHandlers = {
 // --- Main Plugin Entry ---
 utools.onPluginEnter(async (action) => {
   const { code } = action;
-  
+
   // 启动时顺便清理一下因强制退出等意外残留的僵尸指令
   const features = utools.getFeatures();
   const { windowMap } = require('./data.js');
-  
+
   for (const [sid, win] of windowMap.entries()) {
     if (win.isDestroyed()) {
       windowMap.delete(sid);
@@ -706,7 +708,7 @@ ipcRenderer.on('forward-append-msg', (e, { senderId, type, payload }) => {
     if (win.isMinimized()) win.restore();
     if (!win.isVisible()) win.show();
     win.focus();
-    
+
     win.webContents.send('window-append-msg', { type, payload });
   }
 });

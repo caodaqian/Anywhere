@@ -477,6 +477,8 @@
       "envMapping": "环境变量映射（stdio）",
       "envMappingPlaceholder": "OAUTH_TOKEN, MCP_OAUTH_TOKEN",
       "useDcr": "使用动态客户端注册",
+      "dcrHint": "默认使用动态客户端注册（DCR）。如需手动提供 OAuth 客户端，请在高级设置中关闭 DCR。",
+      "oauthAdvancedSection": "OAuth 高级",
       "actions": "操作",
       "saveClient": "保存 Client",
       "login": "登录",
@@ -495,6 +497,7 @@
       "needClientId": "请先输入 Client ID。",
       "needUrl": "启动 OAuth 登录前请先填写服务 URL。",
       "clientSaved": "客户端凭据已保存。",
+      "manualClientSection": "手动 OAuth 客户端（可选）",
       "migrationNotice": "检测到旧版 Authorization: Bearer 请求头 — 已自动迁移为 Bearer 令牌鉴权。"
     },
     "advanced": "高级/可选设置",
