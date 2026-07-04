@@ -492,6 +492,7 @@
       "loginSuccess": "OAuth 登录完成。",
       "loginFailed": "OAuth 登录失败",
       "refreshed": "令牌已刷新。",
+      "refreshFailed": "令牌刷新失败",
       "loggedOut": "已退出登录。",
       "logoutConfirm": "退出登录并清除该服务的 OAuth 令牌？",
       "needClientId": "请先输入 Client ID。",

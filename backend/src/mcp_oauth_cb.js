@@ -144,9 +144,10 @@ function startBrowserWindowFallback({ authorizeUrl, redirectUri, expectedState, 
 
     let win = null;
     try {
+      const safeAuthorizeUrl = normalizeExternalAuthorizationUrl(authorizeUrl);
       const { BrowserWindow } = require('electron');
       win = new BrowserWindow({ width: 900, height: 700, show: true });
-      win.loadURL(String(authorizeUrl));
+      win.loadURL(safeAuthorizeUrl);
 
       const onNavigate = (event, url) => {
         if (!url) return;
@@ -181,7 +182,7 @@ function startBrowserWindowFallback({ authorizeUrl, redirectUri, expectedState, 
 // ---------------------------------------------------------------------------
 
 function openAuthorizationInExternal(url) {
-  const u = String(url);
+  const u = normalizeExternalAuthorizationUrl(url);
   if (typeof utools !== 'undefined' && typeof utools.shellOpenExternal === 'function') {
     return utools.shellOpenExternal(u);
   }
@@ -193,6 +194,19 @@ function openAuthorizationInExternal(url) {
   }
   // Last resort: no-op (caller should handle)
   return undefined;
+}
+
+function normalizeExternalAuthorizationUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(String(url));
+  } catch (_) {
+    throw new Error('Invalid OAuth authorization URL');
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`Unsafe OAuth authorization URL protocol: ${parsed.protocol}`);
+  }
+  return parsed.toString();
 }
 
 // ---------------------------------------------------------------------------

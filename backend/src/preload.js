@@ -58,6 +58,7 @@ const {
 } = require('./mcp.js');
 
 const oauthStore = require('./mcp_oauth_store.js');
+const oauthProvider = require('./mcp_oauth_provider.js');
 
 const {
   listSkills,
@@ -208,11 +209,11 @@ window.api = {
       return { success: false, error: String(e.message || e) };
     }
   },
-  mcpOAuth_refresh: async ({ serverId } = {}) => {
+  mcpOAuth_refresh: async ({ serverId, serverConfig } = {}) => {
     try {
-      const tokens = await oauthStore.loadTokens(serverId);
-      if (!tokens) return { success: false, error: 'No tokens to refresh' };
-      return { success: true, refreshed: true };
+      await oauthProvider.refreshOAuthTokens(serverId, serverConfig || {});
+      const status = await getMcpAuthStatus(serverId, serverConfig || {});
+      return { success: true, refreshed: true, status };
     } catch (e) {
       return { success: false, error: String(e.message || e) };
     }

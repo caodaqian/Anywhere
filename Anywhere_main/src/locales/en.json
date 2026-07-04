@@ -492,6 +492,7 @@
       "loginSuccess": "OAuth login completed.",
       "loginFailed": "OAuth login failed",
       "refreshed": "Token refreshed.",
+      "refreshFailed": "Token refresh failed",
       "loggedOut": "Logged out.",
       "logoutConfirm": "Log out and clear stored OAuth tokens for this server?",
       "needClientId": "Please enter a Client ID first.",

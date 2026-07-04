@@ -35,6 +35,20 @@ const testOutput = ref('');
 // --- OAuth auth status + actions (per editing server) ---
 const oauthStatus = ref(null);
 const oauthBusy = ref(false);
+    const DEFAULT_OAUTH_ENV_MAPPING = ['OAUTH_TOKEN', 'MCP_OAUTH_TOKEN'];
+
+    function createDefaultOAuthConfig() {
+        return {
+            clientId: '',
+            clientSecret: '',
+            scopes: [],
+            scopesInput: '',
+            envMapping: [...DEFAULT_OAUTH_ENV_MAPPING],
+            envMappingInput: DEFAULT_OAUTH_ENV_MAPPING.join(', '),
+            useDcr: true,
+            manualEndpoints: {}
+        };
+    }
 
 function buildServerConfigForAuth() {
     // Reconstruct the server config object the backend expects for OAuth ops,
@@ -82,9 +96,14 @@ async function refreshOAuth() {
     if (!editingServer.id) return;
     oauthBusy.value = true;
     try {
-        await window.api.mcpOAuth_refresh({ serverId: editingServer.id });
-        await refreshOAuthStatus();
-        ElMessage.success(t('mcp.auth.refreshed'));
+        const r = await window.api.mcpOAuth_refresh({ serverId: editingServer.id, serverConfig: buildServerConfigForAuth() });
+        if (r && r.success) {
+            oauthStatus.value = r.status || null;
+            if (!oauthStatus.value) await refreshOAuthStatus();
+            ElMessage.success(t('mcp.auth.refreshed'));
+        } else {
+            ElMessage.error((r && r.error) || t('mcp.auth.refreshFailed'));
+        }
     } catch (e) {
         ElMessage.error(String(e.message || e));
     } finally { oauthBusy.value = false; }
@@ -111,6 +130,7 @@ async function saveManualClient() {
     if (!oauth || !oauth.clientId) { ElMessage.warning(t('mcp.auth.needClientId')); return; }
     try {
         await window.api.mcpOAuth_saveManualClient({ serverId: editingServer.id, clientId: oauth.clientId, clientSecret: oauth.clientSecret });
+        oauth.clientSecret = '';
         ElMessage.success(t('mcp.auth.clientSaved'));
         await refreshOAuthStatus();
     } catch (e) { ElMessage.error(String(e.message || e)); }
@@ -177,7 +197,7 @@ const defaultServer = {
     auth: {
         type: 'none',
         bearerToken: '',
-        oauth: { clientId: '', clientSecret: '', scopes: [], envMapping: ['OAUTH_TOKEN', 'MCP_OAUTH_TOKEN'], useDcr: true }
+        oauth: createDefaultOAuthConfig()
     },
     provider: '',
     providerUrl: '',
@@ -186,24 +206,47 @@ const defaultServer = {
 };
 
 function normalizeAuth(auth) {
-    if (!auth || typeof auth !== 'object') return { type: 'none', bearerToken: '', oauth: { scopes: [], scopesInput: '', envMapping: ['OAUTH_TOKEN', 'MCP_OAUTH_TOKEN'], envMappingInput: 'OAUTH_TOKEN, MCP_OAUTH_TOKEN', useDcr: true } };
-    const out = { type: auth.type || 'none', bearerToken: auth.bearerToken || '' };
-    if (auth.type === 'oauth') {
-        const scopes = Array.isArray(auth.oauth?.scopes) ? auth.oauth.scopes : [];
-        const envMapping = Array.isArray(auth.oauth?.envMapping) && auth.oauth.envMapping.length ? auth.oauth.envMapping : ['OAUTH_TOKEN', 'MCP_OAUTH_TOKEN'];
-        out.oauth = {
-            clientId: auth.oauth?.clientId || '',
-            clientSecret: auth.oauth?.clientSecret || '',
+    const source = auth && typeof auth === 'object' ? auth : {};
+    const scopes = Array.isArray(source.oauth?.scopes) ? source.oauth.scopes : [];
+    const envMapping = Array.isArray(source.oauth?.envMapping) && source.oauth.envMapping.length ? source.oauth.envMapping : DEFAULT_OAUTH_ENV_MAPPING;
+    return {
+        type: source.type || 'none',
+        bearerToken: source.bearerToken || '',
+        oauth: {
+            ...createDefaultOAuthConfig(),
+            clientId: source.oauth?.clientId || '',
+            clientSecret: source.oauth?.clientSecret || '',
             scopes,
             scopesInput: scopes.join(', '),
             envMapping,
             envMappingInput: envMapping.join(', '),
-            useDcr: auth.oauth?.useDcr !== false,
-            redirectPath: auth.oauth?.redirectPath,
-            manualEndpoints: auth.oauth?.manualEndpoints || {}
-        };
+            useDcr: source.oauth?.useDcr !== false,
+            redirectPath: source.oauth?.redirectPath,
+            manualEndpoints: source.oauth?.manualEndpoints || {}
+        }
+    };
+}
+
+    function prepareAuthForPersistence(auth) {
+        const out = normalizeAuth(auth);
+        if (out.type === 'bearer') {
+            delete out.oauth;
+            if (!out.bearerToken) return { type: 'none' };
+            return out;
+        }
+        if (out.type === 'oauth') {
+            out.bearerToken = '';
+            delete out.oauth.scopesInput;
+            delete out.oauth.envMappingInput;
+            delete out.oauth.clientSecret;
+            if (out.oauth.useDcr !== false || !out.oauth.clientId) delete out.oauth.clientId;
+            if (!out.oauth.scopes || out.oauth.scopes.length === 0) delete out.oauth.scopes;
+            if (!out.oauth.envMapping || out.oauth.envMapping.length === 0) delete out.oauth.envMapping;
+            if (!out.oauth.manualEndpoints || Object.keys(out.oauth.manualEndpoints).length === 0) delete out.oauth.manualEndpoints;
+            if (!out.oauth.redirectPath) delete out.oauth.redirectPath;
+        return out;
     }
-    return out;
+    return { type: 'none' };
 }
 
 // Migrate a legacy `Authorization: Bearer <token>` header into auth.bearer.
@@ -393,10 +436,8 @@ async function saveServer() {
             .split(',').map(s => s.trim()).filter(Boolean);
         authObj.oauth.envMapping = (editingServer.auth.oauth.envMappingInput || '')
             .split(',').map(s => s.trim()).filter(Boolean);
-        if (!authObj.oauth.scopes.length) delete authObj.oauth.scopes;
-        if (!authObj.oauth.clientId) delete authObj.oauth.clientId;
-        if (!authObj.oauth.clientSecret) delete authObj.oauth.clientSecret;
     }
+    authObj = prepareAuthForPersistence(authObj);
     // Apply legacy Bearer migration (headers.Authorization: Bearer X → auth.bearer).
     const migrated = migrateLegacyBearer(headersObj, authObj);
     headersObj = migrated.headers;
@@ -483,7 +524,9 @@ async function saveJson() {
                 if (!srv || typeof srv !== 'object') continue;
                 const r = migrateLegacyBearer(srv.headers || {}, srv.auth);
                 srv.headers = r.headers;
-                srv.auth = r.auth;
+                const persistedAuth = r.auth ? prepareAuthForPersistence(r.auth) : undefined;
+                if (persistedAuth && persistedAuth.type !== 'none') srv.auth = persistedAuth;
+                else delete srv.auth;
                 if (r.migrated) { anyMigrated = true; }
             }
         }

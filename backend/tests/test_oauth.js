@@ -59,6 +59,9 @@ async function run(name, fn) {
     blob.ct = Buffer.from('tampered').toString('base64');
     ok('decrypt returns undefined on tamper', store.decrypt(blob) === undefined);
   });
+  await run('malformed encrypted blob is ignored', async () => {
+    ok('decrypt returns undefined on malformed blob', store.decrypt({ v: 1, salt: 'bad' }) === undefined);
+  });
   await run('device seed stable', () => {
     ok('getDeviceSeed non-empty', store.getDeviceSeed().length > 0);
     ok('shardId includes native id', store.shardId('mcpOAuthTokens').includes('test-native-id'));
@@ -136,6 +139,13 @@ async function run(name, fn) {
     ok('mismatch rejected', rejected);
     loop.cleanup();
   });
+  await run('unsafe external authorization URL rejected', async () => {
+    global.__lastOpened = undefined;
+    let rejected = false;
+    try { cb.openAuthorizationInExternal('javascript:alert(1)'); } catch (e) { rejected = /unsafe|invalid/i.test(String(e.message || e)); }
+    ok('unsafe URL rejected', rejected);
+    ok('unsafe URL not opened', global.__lastOpened === undefined);
+  });
 
   console.log('\n[4] provider shape (langchain oAuthClientProviderSchema)');
   await run('provider passes schema', async () => {
@@ -178,6 +188,17 @@ async function run(name, fn) {
     const ci = await p.clientInformation();
     ok('manual client_id used', ci && ci.client_id === 'MANUAL');
     ok('manual client_secret', ci && ci.client_secret === 'SEC');
+  });
+  await run('provider accepts bound redirect uri override', async () => {
+    const redirectUri = 'http://127.0.0.1:54321/callback';
+    const p = provider.buildOAuthClientProvider('srv-live', {
+      auth: { type: 'oauth', oauth: { clientId: 'MANUAL', clientSecret: 'SEC' } }
+    }, { redirectUri, state: 'STATE-1' });
+    const ci = await p.clientInformation();
+    ok('redirectUrl uses bound uri', p.redirectUrl === redirectUri);
+    ok('clientMetadata uses bound uri', p.clientMetadata.redirect_uris[0] === redirectUri);
+    ok('manual client uses bound uri', ci && ci.redirect_uris && ci.redirect_uris[0] === redirectUri);
+    ok('state override is reused', await p.state() === 'STATE-1');
   });
 
   console.log('\n[5] provider.isUnauthorizedError');

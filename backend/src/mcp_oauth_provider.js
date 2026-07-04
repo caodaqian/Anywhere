@@ -57,17 +57,20 @@ const DEFAULT_REDIRECT_PORT = 0; // ephemeral loopback
  *
  * @param {string} serverId
  * @param {object} serverConfig - full server config (must contain auth.oauth)
+ * @param {object} [options]
+ * @param {string} [options.redirectUri] - already-bound loopback redirect URI
+ * @param {string} [options.state] - existing OAuth state to reuse for one flow
  * @returns {object} OAuthClientProvider implementation
  */
-function buildOAuthClientProvider(serverId, serverConfig = {}) {
+function buildOAuthClientProvider(serverId, serverConfig = {}, options = {}) {
   const oauth = (serverConfig.auth && serverConfig.auth.oauth) || {};
   const redirectPort = (oauth.redirectPath && Number(oauth.redirectPath)) || DEFAULT_REDIRECT_PORT;
-  const redirectUri = cb.determineRedirectUri(redirectPort);
+  const redirectUri = options.redirectUri ? String(options.redirectUri) : cb.determineRedirectUri(redirectPort);
 
   // Bound state for the in-flight authorization (so the provider's
   // redirectToAuthorization and the orchestrator's runAuthFlowWithFallback
   // share the same expected state).
-  let pendingState = null;
+  let pendingState = options.state ? String(options.state) : null;
 
   const provider = {
     // --- required ---
@@ -89,12 +92,14 @@ function buildOAuthClientProvider(serverId, serverConfig = {}) {
     async clientInformation() {
       // Prefer user-supplied manual client (useDcr=false), else stored DCR result.
       if (oauth.clientId) {
+        const stored = await store.loadClientInfo(serverId);
+        const clientSecret = oauth.clientSecret || stored?.client_secret || undefined;
         return {
           client_id: oauth.clientId,
-          client_secret: oauth.clientSecret || undefined,
+          client_secret: clientSecret,
           redirect_uris: [redirectUri],
           grant_types: ['authorization_code', 'refresh_token'],
-          token_endpoint_auth_method: oauth.clientSecret
+          token_endpoint_auth_method: clientSecret
             ? 'client_secret_post'
             : 'none'
         };
@@ -154,6 +159,43 @@ function buildOAuthClientProvider(serverId, serverConfig = {}) {
   };
 
   return provider;
+}
+
+async function refreshOAuthTokens(serverId, serverConfig = {}) {
+  const provider = buildOAuthClientProvider(serverId, serverConfig);
+  const tokens = await provider.tokens();
+  if (!tokens || !tokens.refresh_token) throw new Error('No OAuth refresh token available');
+
+  const serverUrl = serverConfig.url || serverConfig.baseUrl;
+  if (!serverUrl) throw new Error(`OAuth refresh requires a server url for ${serverId}`);
+
+  const clientInformation = await provider.clientInformation();
+  if (!clientInformation || !clientInformation.client_id) throw new Error('OAuth client information is missing');
+
+  const {
+    discoverOAuthServerInfo,
+    refreshAuthorization,
+    selectResourceURL,
+  } = loadSdkAuth();
+
+  const serverInfo = await discoverOAuthServerInfo(serverUrl);
+  const resource = typeof selectResourceURL === 'function'
+    ? await selectResourceURL(serverUrl, provider, serverInfo.resourceMetadata)
+    : undefined;
+  const refreshed = await refreshAuthorization(serverInfo.authorizationServerUrl, {
+    metadata: serverInfo.authorizationServerMetadata,
+    clientInformation,
+    refreshToken: tokens.refresh_token,
+    resource,
+    addClientAuthentication: provider.addClientAuthentication,
+  });
+  const merged = {
+    ...tokens,
+    ...refreshed,
+    refresh_token: refreshed.refresh_token || tokens.refresh_token,
+  };
+  await provider.saveTokens(merged);
+  return merged;
 }
 
 // ---------------------------------------------------------------------------
@@ -268,5 +310,6 @@ module.exports = {
   finishAuthFlow,
   isUnauthorizedError,
   getProvider,
-  loadSdkAuth
+  loadSdkAuth,
+  refreshOAuthTokens
 };

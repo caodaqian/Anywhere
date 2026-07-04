@@ -132,8 +132,16 @@ function preprocessStdioConfig(config) {
 async function prepareStdioAuthEnv(serverConfig) {
   const auth = serverConfig && serverConfig.auth && typeof serverConfig.auth === 'object' ? serverConfig.auth : null;
   if (!auth || auth.type !== 'oauth' || !auth.oauth) return undefined;
-  const tokens = await oauthStore.loadTokens(serverConfig.id);
+  const serverId = serverConfig && serverConfig.id;
+  if (!serverId) return undefined;
+  const tokens = await oauthStore.loadTokens(serverId);
   if (!tokens || !tokens.access_token) return undefined;
+  if (oauthStore.isExpired(tokens.expires_at)) {
+    const err = new Error(`OAuth token expired for ${serverId}`);
+    err.needsReauth = true;
+    err.authExpired = true;
+    throw err;
+  }
   const mapping = (auth.oauth.envMapping && Array.isArray(auth.oauth.envMapping) && auth.oauth.envMapping.length)
     ? auth.oauth.envMapping
     : ['OAUTH_TOKEN', 'MCP_OAUTH_TOKEN'];
@@ -141,6 +149,14 @@ async function prepareStdioAuthEnv(serverConfig) {
   for (const key of mapping) env[key] = tokens.access_token;
   if (tokens.expires_at) env.OAUTH_EXPIRES_AT = String(tokens.expires_at);
   return env;
+}
+
+async function applyStdioAuthEnv(runtimeConfig, id, sourceConfig) {
+  const transportType = normalizeTransportType(runtimeConfig.transport || runtimeConfig.type || sourceConfig?.transport || sourceConfig?.type || '');
+  if (transportType !== 'stdio') return runtimeConfig;
+  const stdioEnv = await prepareStdioAuthEnv({ id, ...(sourceConfig || {}) });
+  if (stdioEnv) runtimeConfig.env = { ...(runtimeConfig.env || {}), ...stdioEnv };
+  return runtimeConfig;
 }
 
 
@@ -180,9 +196,21 @@ function buildMcpClientServerConfig(id, config = {}, options = {}) {
     // Static bearer stays in headers (existing behavior preserved).
     runtimeConfig.headers = { ...(runtimeConfig.headers || {}), Authorization: `Bearer ${auth.bearerToken}` };
   }
-  // stdio env injection handled in preprocessStdioConfig (below) since it merges env.
+  delete runtimeConfig.auth;
 
   return { id, ...runtimeConfig };
+}
+
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === 'object') {
+    return Object.keys(value).sort().reduce((acc, key) => {
+      const item = stableValue(value[key]);
+      if (item !== undefined) acc[key] = item;
+      return acc;
+    }, {});
+  }
+  return value;
 }
 
 function getToolFetchKey(id, config = {}) {
@@ -194,6 +222,7 @@ function getToolFetchKey(id, config = {}) {
     url: config.url || config.baseUrl || '',
     env: config.env && typeof config.env === 'object' ? Object.entries(config.env).sort(([a], [b]) => a.localeCompare(b)) : [],
     headers: config.headers && typeof config.headers === 'object' ? Object.entries(config.headers).sort(([a], [b]) => a.localeCompare(b)) : [],
+    auth: stableValue(config.auth || null),
     isPersistent: Boolean(config.isPersistent)
   };
   return JSON.stringify(normalizedConfig);
@@ -219,29 +248,19 @@ async function ensureMcpAuthenticated(id, serverConfig) {
   const auth = serverConfig && serverConfig.auth && typeof serverConfig.auth === 'object' ? serverConfig.auth : null;
   if (!auth || auth.type !== 'oauth') return false;
 
-  const provider = oauthProvider.buildOAuthClientProvider(id, serverConfig);
   const serverUrl = serverConfig.url || serverConfig.baseUrl;
   if (!serverUrl) throw new Error(`OAuth login requires a server url for ${id}`);
 
   // Trigger discovery + DCR + authorize URL construction via SDK auth() helper.
   // This calls provider.redirectToAuthorization(url) which opens the browser.
-  const { auth: sdkAuth, UnauthorizedError } = oauthProvider.loadSdkAuth();
-  const state = typeof provider.state === 'function' ? await provider.state() : undefined;
+  const { auth: sdkAuth } = oauthProvider.loadSdkAuth();
+  const seedProvider = oauthProvider.buildOAuthClientProvider(id, serverConfig);
+  const state = typeof seedProvider.state === 'function' ? await seedProvider.state() : undefined;
 
   // Start loopback callback capture first so we know the bound port.
   const loopback = await oauthCb.startLoopbackCallback({ expectedState: state, port: 0 });
-  // Rebuild provider with the bound redirect port so the authorize URL's
-  // redirect_uri matches the listening server. (provider._redirectUri is fixed
-  // at build time; we override via a thin wrapper so SDK uses the live port.)
-  const liveRedirectUri = loopback.redirectUri;
-  const liveProvider = new Proxy(provider, {
-    get(target, prop, receiver) {
-      if (prop === 'redirectUrl') return liveRedirectUri;
-      return Reflect.get(target, prop, receiver);
-    }
-  });
+  const liveProvider = oauthProvider.buildOAuthClientProvider(id, serverConfig, { redirectUri: loopback.redirectUri, state });
 
-  let authorizeUrl = null;
   try {
     // auth() with no authorizationCode → discovery + DCR + redirectToAuthorization
     // → throws UnauthorizedError (expected; we catch and continue).
@@ -319,10 +338,11 @@ async function connectAndFetchTools(id, config) {
     const timeoutId = setTimeout(() => controller.abort(), 10000);
 
     try {
-      const runtimeConfig = buildMcpClientServerConfig(id, config, { useConfiguredTimeout: false });
+      const runtimeConfig = await applyStdioAuthEnv(buildMcpClientServerConfig(id, config, { useConfiguredTimeout: false }), id, config);
       tempClient = new MultiServerMCPClient({ [id]: runtimeConfig }, { signal: controller.signal });
       return await tempClient.getTools();
     } catch (error) {
+      if (error && error.needsReauth) throw error;
       // OAuth: SDK ran discovery+DCR+redirectToAuthorization then threw UnauthorizedError.
       // For the ephemeral test-connect path we surface needsReauth so the UI can
       // drive the interactive login via mcpOAuth_startAuthFlow (avoid blocking here).
@@ -519,7 +539,7 @@ async function initializeMcpClient(activeServerConfigs = {}, cachedToolsMap = {}
       }
 
       try {
-        const runtimeConfig = buildMcpClientServerConfig(id, config);
+        const runtimeConfig = await applyStdioAuthEnv(buildMcpClientServerConfig(id, config), id, config);
         const client = new MultiServerMCPClient({ [id]: runtimeConfig });
         let tools;
         try {
@@ -529,7 +549,7 @@ async function initializeMcpClient(activeServerConfigs = {}, cachedToolsMap = {}
             // Run interactive login then reconnect once.
             await ensureMcpAuthenticated(id, config);
             try { await client.close(); } catch (_) { }
-            const retryConfig = buildMcpClientServerConfig(id, config);
+            const retryConfig = await applyStdioAuthEnv(buildMcpClientServerConfig(id, config), id, config);
             const retryClient = new MultiServerMCPClient({ [id]: retryConfig });
             tools = await retryClient.getTools();
             persistentClients.set(id, retryClient);
@@ -624,11 +644,7 @@ async function invokeMcpTool(toolName, toolArgs, signal, context = null) {
     }
 
     try {
-      const runtimeConfig = buildMcpClientServerConfig(serverConfig.id, serverConfig);
-      // stdio OAuth: inject access_token into child env before spawn.
-      const stdioEnv = (runtimeConfig.transport === 'stdio' || runtimeConfig.type === 'stdio')
-        ? await prepareStdioAuthEnv(serverConfig) : undefined;
-      if (stdioEnv) runtimeConfig.env = { ...(runtimeConfig.env || {}), ...stdioEnv };
+      const runtimeConfig = await applyStdioAuthEnv(buildMcpClientServerConfig(serverConfig.id, serverConfig), serverConfig.id, serverConfig);
       tempClient = new MultiServerMCPClient({ [serverConfig.id]: runtimeConfig }, { signal: controller.signal });
       const tools = await tempClient.getTools();
       const toolToCall = tools.find(t => t.name === resolvedToolName || sanitizeToolName(t.name, serverConfig.id || 'tool') === toolName);
@@ -656,11 +672,7 @@ async function connectAndInvokeTool(id, config, toolName, toolArgs, context = nu
   const controller = new AbortController();
 
   try {
-    const runtimeConfig = buildMcpClientServerConfig(id, config);
-    // stdio OAuth: inject access_token into child env before spawn.
-    const stdioEnv = (runtimeConfig.transport === 'stdio' || runtimeConfig.type === 'stdio')
-      ? await prepareStdioAuthEnv(config) : undefined;
-    if (stdioEnv) runtimeConfig.env = { ...(runtimeConfig.env || {}), ...stdioEnv };
+    const runtimeConfig = await applyStdioAuthEnv(buildMcpClientServerConfig(id, config), id, config);
     tempClient = new MultiServerMCPClient({ [id]: runtimeConfig }, { signal: controller.signal });
     const tools = await tempClient.getTools();
     const normalizedToolName = sanitizeToolName(toolName, id || 'tool');
@@ -718,4 +730,8 @@ module.exports = {
   connectAndInvokeTool,
   ensureMcpAuthenticated,
   getMcpAuthStatus,
+  _test: {
+    getToolFetchKey,
+    prepareStdioAuthEnv,
+  },
 };

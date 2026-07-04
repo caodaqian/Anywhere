@@ -81,18 +81,18 @@ function encrypt(plain) {
 
 function decrypt(blob) {
   if (!blob || typeof blob !== 'object') return undefined;
-  const salt = Buffer.from(blob.salt, 'base64');
-  const iv = Buffer.from(blob.iv, 'base64');
-  const ct = Buffer.from(blob.ct, 'base64');
-  const tag = Buffer.from(blob.tag, 'base64');
-  const key = deriveKey(salt);
-  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-  decipher.setAuthTag(tag);
   try {
+    const salt = Buffer.from(blob.salt, 'base64');
+    const iv = Buffer.from(blob.iv, 'base64');
+    const ct = Buffer.from(blob.ct, 'base64');
+    const tag = Buffer.from(blob.tag, 'base64');
+    const key = deriveKey(salt);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(tag);
     const pt = Buffer.concat([decipher.update(ct), decipher.final()]).toString('utf8');
     return pt;
   } catch (e) {
-    // GCM auth failure (wrong device / tampered ciphertext)
+    // Malformed blob, GCM auth failure, wrong device, or tampered ciphertext.
     return undefined;
   }
 }
